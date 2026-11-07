@@ -2,9 +2,12 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"strings"
+	"time"
 
 	"learning/model"
 	"learning/tool"
@@ -113,7 +116,8 @@ func (a *Agent) execute(ctx context.Context, call model.ToolCall, messages []mod
 		fmt.Println("[需要审批]: 检测到高危操作，挂起等待审批！")
 
 		cp := &model.CheckPoint{
-			RunID:           "run-123",
+			RunID:           fmt.Sprintf("run-%d", time.Now().UnixNano()),
+			StepID:          fmt.Sprintf("step-%d", time.Now().UnixNano()),
 			Messages:        messages,
 			PendingToolCall: call,
 		}
@@ -149,6 +153,20 @@ func (a *Agent) Resume(ctx context.Context, decision string) error {
 		if err != nil {
 			result = fmt.Sprintf("工具执行失败: %v", err)
 		}
+	} else if newArgs, ok := strings.CutPrefix(decision, "modify "); ok {
+		if !json.Valid([]byte(newArgs)) {
+			return fmt.Errorf("您修改的参数不是合法的 JSON 格式")
+		}
+		fmt.Println("[用户选择]: 修改参数为:", newArgs)
+
+		call.Function.Arguments = newArgs
+
+		t := a.tools[call.Function.Name]
+		result, err = t.Execute(ctx, call.Function.Arguments)
+		if err != nil {
+			result = fmt.Sprintf("工具执行失败: %v", err)
+		}
+		result = fmt.Sprintf("用户在审批时已将当前参数修改成 %s\n %s", newArgs, result)
 	} else {
 		return fmt.Errorf("未知的指令，请输入 y 或 n")
 	}
