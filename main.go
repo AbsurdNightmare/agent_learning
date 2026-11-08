@@ -24,14 +24,18 @@ func main() {
 		tool.NewGetServerStatusTool(),
 		tool.NewWelcomeUserTool(),
 		tool.NewDeleteFileTool(),
+		tool.NewBashTool(),
 	})
 
 	scanner := bufio.NewScanner(os.Stdin)
+	ctx := context.Background()
 	for {
-		if _, err := os.Stat("checkpoint.json"); err == nil {
-			fmt.Print("[等待审批 (y/n)] >>  ")
+		cp, err := agent.LoadCheckPoint(ctx)
+		isPending := err == nil && cp.CurrentState == agent.StatePendingApproval
+		if isPending {
+			fmt.Print("[等待审批 (y/n/modify)] >> ")
 		} else {
-			fmt.Print(">>  ")
+			fmt.Print(">> ")
 		}
 
 		if !scanner.Scan() {
@@ -48,7 +52,7 @@ func main() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 
 		var runErr error
-		if _, err := os.Stat("checkpoint.json"); err == nil {
+		if isPending {
 			runErr = a.Resume(ctx, input)
 		} else {
 			runErr = a.Run(ctx, input)

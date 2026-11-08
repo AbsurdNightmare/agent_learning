@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,13 +16,27 @@ import (
 
 const maxSteps = 10
 
+const logPath = "execution_log.txt"
+
 var ErrInterrupted = errors.New("agent interrupted for approval")
 
+type AgentState string
+
+const (
+	StateRunning         AgentState = "RUNNING"
+	StatePendingApproval AgentState = "PENDING_APPROVAL"
+	StateApproved        AgentState = "APPROVED"
+	StateResumed         AgentState = "RESUMED"
+	StateRejected        AgentState = "REJECTED"
+	StateTerminated      AgentState = "TERMINATED"
+)
+
 type Agent struct {
-	client   *model.Client
-	messages []model.Message
-	tools    map[string]tool.Tool
-	schemas  []any
+	client       *model.Client
+	messages     []model.Message
+	tools        map[string]tool.Tool
+	schemas      []any
+	currentState AgentState
 }
 
 func NewAgent(client *model.Client, tools []tool.Tool) *Agent {
@@ -115,9 +130,10 @@ func (a *Agent) execute(ctx context.Context, call model.ToolCall, messages []mod
 	if t.Info().RequireApproval {
 		fmt.Println("[需要审批]: 检测到高危操作，挂起等待审批！")
 
-		cp := &model.CheckPoint{
+		cp := &CheckPoint{
 			RunID:           fmt.Sprintf("run-%d", time.Now().UnixNano()),
-			StepID:          fmt.Sprintf("step-%d", time.Now().UnixNano()),
+			StepID:          int(time.Now().UnixNano()),
+			CurrentState:    StatePendingApproval,
 			Messages:        messages,
 			PendingToolCall: call,
 		}
@@ -126,6 +142,7 @@ func (a *Agent) execute(ctx context.Context, call model.ToolCall, messages []mod
 			return "", err
 		}
 
+		a.currentState = StatePendingApproval
 		return "", ErrInterrupted
 	}
 
@@ -139,25 +156,43 @@ func (a *Agent) Resume(ctx context.Context, decision string) error {
 		return fmt.Errorf("没有找到需要恢复的任务: %v", err)
 	}
 
+	if cp.CurrentState != StatePendingApproval {
+		return fmt.Errorf("当前没有等待审核的任务")
+	}
+
 	a.messages = cp.Messages
 	call := cp.PendingToolCall
 
 	var result string
 	if decision == "n" {
 		fmt.Println("[用户选择]: 用户拒绝了操作")
+		a.currentState = StateRejected
 		result = "用户拒绝了此危险操作，请勿重试"
+		a.currentState = StateTerminated
 	} else if decision == "y" {
 		fmt.Println("[用户选择]: 用户批准了操作")
-		t := a.tools[call.Function.Name]
-		result, err = t.Execute(ctx, call.Function.Arguments)
-		if err != nil {
-			result = fmt.Sprintf("工具执行失败: %v", err)
+		a.currentState = StateApproved
+
+		if isAlreadyExecuted(cp.RunID, cp.StepID) {
+			fmt.Println("检测到该步骤已执行过，触发幂等保护，直接跳过！")
+			result = "该工具已在此前成功执行"
+		} else {
+			t := a.tools[call.Function.Name]
+			result, err = t.Execute(ctx, call.Function.Arguments)
+			if err != nil {
+				result = fmt.Sprintf("工具执行失败: %v", err)
+			}
+
+			recordExecution(cp.RunID, cp.StepID)
 		}
+
+		a.currentState = StateResumed
 	} else if newArgs, ok := strings.CutPrefix(decision, "modify "); ok {
 		if !json.Valid([]byte(newArgs)) {
 			return fmt.Errorf("您修改的参数不是合法的 JSON 格式")
 		}
 		fmt.Println("[用户选择]: 修改参数为:", newArgs)
+		a.currentState = StateApproved
 
 		call.Function.Arguments = newArgs
 
@@ -167,6 +202,8 @@ func (a *Agent) Resume(ctx context.Context, decision string) error {
 			result = fmt.Sprintf("工具执行失败: %v", err)
 		}
 		result = fmt.Sprintf("用户在审批时已将当前参数修改成 %s\n %s", newArgs, result)
+
+		a.currentState = StateResumed
 	} else {
 		return fmt.Errorf("未知的指令，请输入 y 或 n")
 	}
@@ -179,5 +216,42 @@ func (a *Agent) Resume(ctx context.Context, decision string) error {
 
 	_ = os.Remove("checkpoint.json")
 
+	a.currentState = StateRunning
 	return a.loop(ctx)
+}
+
+func isAlreadyExecuted(runID string, stepID int) bool {
+	file, err := os.Open(logPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false
+		}
+		fmt.Println("读取账本失败:", err)
+		return false
+	}
+	defer file.Close()
+
+	targetKey := fmt.Sprintf("%s-%d", runID, stepID)
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		if scanner.Text() == targetKey {
+			return true
+		}
+	}
+	return false
+}
+
+func recordExecution(runID string, stepID int) {
+	file, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		fmt.Println("无法打开日志账本:", err)
+		return
+	}
+	defer file.Close()
+
+	log := fmt.Sprintf("%s-%d\n", runID, stepID)
+	if _, err := file.WriteString(log); err != nil {
+		fmt.Println("写入账本失败:", err)
+	}
 }

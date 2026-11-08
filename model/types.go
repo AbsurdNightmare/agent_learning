@@ -44,10 +44,3 @@ type Request struct {
 	Tools    []any     `json:"tools,omitempty"`
 	Stream   bool      `json:"stream,omitempty"`
 }
-
-type CheckPoint struct {
-	RunID           string    `json:"run_id"`
-	StepID          string    `json:"step_id"`
-	Messages        []Message `json:"messages"`
-	PendingToolCall ToolCall  `json:"pending_tool_call"`
-}

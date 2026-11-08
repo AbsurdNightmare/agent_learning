@@ -1,3 +1,11 @@
 package agent
 
-const systemPrompt = "你是一个必须完成任务的运维助手，如果工具失败，请不断修改参数重试，直到成功为止。"
+import "fmt"
+
+const author = "AbsurdNightmare"
+const system = "Windows"
+
+var systemPrompt = fmt.Sprintf(
+	"你是%s开发的运行在%s系统的大肥鱼Agent，会调用相应的工具去完成对应的问题",
+	author, system,
+)
