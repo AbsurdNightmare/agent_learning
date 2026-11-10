@@ -17,6 +17,7 @@ import (
 const maxSteps = 10
 
 const logPath = "execution_log.txt"
+const mcpPath = "D:\\agent\\mcp-file-server\\mcp-file-server.exe"
 
 var ErrInterrupted = errors.New("agent interrupted for approval")
 

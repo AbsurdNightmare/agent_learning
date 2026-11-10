@@ -4,13 +4,17 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"log"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
 	"learning/agent"
 	"learning/model"
 	"learning/tool"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func main() {
@@ -20,15 +24,40 @@ func main() {
 		return
 	}
 
-	a := agent.NewAgent(model.NewClient(config), []tool.Tool{
+	ctx := context.Background()
+
+	fmt.Println("[系统] 正在启动并连接 MCP Server...")
+	cmd := exec.Command(config.MCPPath)
+	transport := &mcp.CommandTransport{Command: cmd}
+
+	mcpClient := mcp.NewClient(&mcp.Implementation{Name: "my-agent-client", Version: "1.0.0"}, nil)
+	session, err := mcpClient.Connect(ctx, transport, nil)
+	if err != nil {
+		log.Fatalf("[系统] 连接 MCP Server 失败: %v", err)
+	}
+	defer session.Close()
+
+	mcpToolsList, err := session.ListTools(ctx, &mcp.ListToolsParams{})
+	if err != nil {
+		log.Fatalf("[系统] 获取 MCP 工具失败: %v", err)
+	}
+
+	agentTools := []tool.Tool{
 		tool.NewGetServerStatusTool(),
 		tool.NewWelcomeUserTool(),
-		tool.NewDeleteFileTool(),
-		tool.NewBashTool(),
-	})
+	}
+
+	for _, mt := range mcpToolsList.Tools {
+		fmt.Printf("[系统] 成功加载 MCP 工具: %s\n", mt.Name)
+		agentTools = append(agentTools, &tool.MCPTool{
+			Session: session,
+			McpObj:  mt,
+		})
+	}
+
+	a := agent.NewAgent(model.NewClient(config), agentTools)
 
 	scanner := bufio.NewScanner(os.Stdin)
-	ctx := context.Background()
 	for {
 		cp, err := agent.LoadCheckPoint(ctx)
 		isPending := err == nil && cp.CurrentState == agent.StatePendingApproval
@@ -49,13 +78,13 @@ func main() {
 			break
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		taskCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 
 		var runErr error
 		if isPending {
-			runErr = a.Resume(ctx, input)
+			runErr = a.Resume(taskCtx, input)
 		} else {
-			runErr = a.Run(ctx, input)
+			runErr = a.Run(taskCtx, input)
 		}
 
 		cancel()
