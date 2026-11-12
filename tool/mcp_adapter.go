@@ -19,11 +19,13 @@ func (m *MCPTool) Info() ToolInfo {
 	var params map[string]any
 	_ = json.Unmarshal(schemaBytes, &params)
 
-	needsApproval := strings.Contains(m.McpObj.Name, "delete")
+	needsApproval := strings.Contains(m.McpObj.Description, "[require_approval:true]")
+
+	cleanDesc := strings.ReplaceAll(m.McpObj.Description, "[requires_approval:true]", "")
 
 	return ToolInfo{
 		Name:            m.McpObj.Name,
-		Description:     m.McpObj.Description,
+		Description:     cleanDesc,
 		Parameters:      params,
 		RequireApproval: needsApproval,
 	}

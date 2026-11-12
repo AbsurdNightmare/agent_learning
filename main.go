@@ -1,96 +1,53 @@
 package main
 
 import (
-	"bufio"
-	"context"
 	"fmt"
-	"log"
-	"os"
-	"os/exec"
-	"strings"
-	"time"
-
-	"learning/agent"
 	"learning/model"
+	"learning/search"
 	"learning/tool"
-
-	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"log"
+	"net/http"
 )
 
-func main() {
-	config, err := model.LoadConfig()
+var (
+	llmClient    *model.Client
+	searchClient *search.Client
+	corpus       []search.Document
+	agentTools   []tool.Tool
+)
+
+func initApp() {
+	llmConfig, err := model.LoadConfig()
 	if err != nil {
-		fmt.Println("加载模型配置失败:", err)
-		return
+		log.Fatal("LLM配置失败:", err)
+	}
+	llmClient = model.NewClient(llmConfig)
+
+	embedConfig, err := search.LoadConfig()
+	if err != nil {
+		log.Fatal("Embedding配置失败:", err)
+	}
+	searchClient = search.NewClient(embedConfig)
+
+	corpus, err = search.LoadCorpus()
+	if err != nil {
+		log.Fatal("语料库加载失败:", err)
 	}
 
-	ctx := context.Background()
-
-	fmt.Println("[系统] 正在启动并连接 MCP Server...")
-	cmd := exec.Command(config.MCPPath)
-	transport := &mcp.CommandTransport{Command: cmd}
-
-	mcpClient := mcp.NewClient(&mcp.Implementation{Name: "my-agent-client", Version: "1.0.0"}, nil)
-	session, err := mcpClient.Connect(ctx, transport, nil)
-	if err != nil {
-		log.Fatalf("[系统] 连接 MCP Server 失败: %v", err)
-	}
-	defer session.Close()
-
-	mcpToolsList, err := session.ListTools(ctx, &mcp.ListToolsParams{})
-	if err != nil {
-		log.Fatalf("[系统] 获取 MCP 工具失败: %v", err)
-	}
-
-	agentTools := []tool.Tool{
-		tool.NewGetServerStatusTool(),
+	agentTools = []tool.Tool{
+		tool.NewSearchDocsTool(searchClient, corpus),
 		tool.NewWelcomeUserTool(),
+		tool.NewGetServerStatusTool(),
 	}
+	fmt.Println("系统初始化完成，工具已加载")
+}
 
-	for _, mt := range mcpToolsList.Tools {
-		fmt.Printf("[系统] 成功加载 MCP 工具: %s\n", mt.Name)
-		agentTools = append(agentTools, &tool.MCPTool{
-			Session: session,
-			McpObj:  mt,
-		})
-	}
+func main() {
+	initApp()
 
-	a := agent.NewAgent(model.NewClient(config), agentTools)
+	http.HandleFunc("/api/chat", handleChat)
+	http.HandleFunc("/api/resume", handleResume)
 
-	scanner := bufio.NewScanner(os.Stdin)
-	for {
-		cp, err := agent.LoadCheckPoint(ctx)
-		isPending := err == nil && cp.CurrentState == agent.StatePendingApproval
-		if isPending {
-			fmt.Print("[等待审批 (y/n/modify)] >> ")
-		} else {
-			fmt.Print(">> ")
-		}
-
-		if !scanner.Scan() {
-			break
-		}
-		input := strings.TrimSpace(scanner.Text())
-		if input == "" {
-			continue
-		}
-		if input == "exit" {
-			break
-		}
-
-		taskCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-
-		var runErr error
-		if isPending {
-			runErr = a.Resume(taskCtx, input)
-		} else {
-			runErr = a.Run(taskCtx, input)
-		}
-
-		cancel()
-
-		if runErr != nil {
-			fmt.Println(runErr)
-		}
-	}
+	fmt.Println("Server started at :8080")
+	log.Fatal(http.ListenAndServe(":8080", nil))
 }

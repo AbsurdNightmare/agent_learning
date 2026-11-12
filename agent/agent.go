@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,7 +18,6 @@ import (
 const maxSteps = 10
 
 const logPath = "execution_log.txt"
-const mcpPath = "D:\\agent\\mcp-file-server\\mcp-file-server.exe"
 
 var ErrInterrupted = errors.New("agent interrupted for approval")
 
@@ -33,19 +33,23 @@ const (
 )
 
 type Agent struct {
-	client       *model.Client
-	messages     []model.Message
-	tools        map[string]tool.Tool
-	schemas      []any
-	currentState AgentState
+	client           *model.Client
+	messages         []model.Message
+	tools            map[string]tool.Tool
+	schemas          []any
+	currentState     AgentState
+	maxContextTokens int
 }
 
 func NewAgent(client *model.Client, tools []tool.Tool) *Agent {
+	maxTokens, _ := strconv.Atoi(os.Getenv("MAX_CONTEXT_TOKENS"))
+
 	a := &Agent{
-		client:   client,
-		messages: make([]model.Message, 0),
-		tools:    make(map[string]tool.Tool),
-		schemas:  tool.Schemas(tools),
+		client:           client,
+		messages:         make([]model.Message, 0),
+		tools:            make(map[string]tool.Tool),
+		schemas:          tool.Schemas(tools),
+		maxContextTokens: maxTokens,
 	}
 
 	for _, t := range tools {
@@ -55,28 +59,20 @@ func NewAgent(client *model.Client, tools []tool.Tool) *Agent {
 	return a
 }
 
-func (a *Agent) loop(ctx context.Context) error {
+func (a *Agent) loop(ctx context.Context, eventChan chan<- model.AgentEvent) error {
 	for range maxSteps {
-		thinkingTitlePrinted := false
-		answeringTitlePrinted := false
+		a.messages = a.CompressHistory(a.messages)
+
+		eventChan <- model.AgentEvent{Type: "thinking", Content: "开始请求模型..."}
 
 		reply, err := a.client.Chat(ctx, a.messages, a.schemas, func(delta model.Delta) {
 			if delta.ReasoningContent != "" {
-				if !thinkingTitlePrinted {
-					fmt.Print("[思考中]: ")
-					thinkingTitlePrinted = true
-				}
-				fmt.Print(delta.ReasoningContent)
+				eventChan <- model.AgentEvent{Type: "thinking", Content: delta.ReasoningContent}
 			}
 			if delta.Content != "" {
-				if !answeringTitlePrinted {
-					fmt.Print("[回答]: ")
-					answeringTitlePrinted = true
-				}
-				fmt.Print(delta.Content)
+				eventChan <- model.AgentEvent{Type: "thinking", Content: delta.Content}
 			}
 		})
-		fmt.Println()
 
 		if err != nil {
 			if errors.Is(err, context.DeadlineExceeded) {
@@ -88,6 +84,7 @@ func (a *Agent) loop(ctx context.Context) error {
 		a.messages = append(a.messages, reply)
 
 		if len(reply.ToolCalls) == 0 {
+			eventChan <- model.AgentEvent{Type: "done", Content: "本轮任务结束"}
 			return nil
 		}
 
@@ -96,16 +93,19 @@ func (a *Agent) loop(ctx context.Context) error {
 		}
 
 		for _, call := range reply.ToolCalls {
+			eventChan <- model.AgentEvent{Type: "tool_call", Content: "调用工具: " + call.Function.Name}
+
 			result, err := a.execute(ctx, call, a.messages)
 			if err != nil {
 				if errors.Is(err, ErrInterrupted) {
+					eventChan <- model.AgentEvent{Type: "interrupted", Content: "触发审批，等待恢复"}
 					return nil
 				}
 
-				fmt.Printf("工具报错: %s\n", err)
 				result = fmt.Sprintf("工具执行失败: %v\n", err)
 			}
 
+			eventChan <- model.AgentEvent{Type: "tool_result", Content: result}
 			a.messages = append(a.messages, model.Message{
 				Role:       "tool",
 				Content:    result,
@@ -117,9 +117,9 @@ func (a *Agent) loop(ctx context.Context) error {
 	return errors.New("超出最大重试限制，强制终止")
 }
 
-func (a *Agent) Run(ctx context.Context, input string) error {
+func (a *Agent) Run(ctx context.Context, input string, eventChan chan<- model.AgentEvent) error {
 	a.messages = append(a.messages, model.Message{Role: "user", Content: input})
-	return a.loop(ctx)
+	return a.loop(ctx, eventChan)
 }
 
 func (a *Agent) execute(ctx context.Context, call model.ToolCall, messages []model.Message) (string, error) {
@@ -151,7 +151,7 @@ func (a *Agent) execute(ctx context.Context, call model.ToolCall, messages []mod
 	return t.Execute(ctx, call.Function.Arguments)
 }
 
-func (a *Agent) Resume(ctx context.Context, decision string) error {
+func (a *Agent) Resume(ctx context.Context, decision string, eventChan chan<- model.AgentEvent) error {
 	cp, err := LoadCheckPoint(ctx)
 	if err != nil {
 		return fmt.Errorf("没有找到需要恢复的任务: %v", err)
@@ -218,7 +218,41 @@ func (a *Agent) Resume(ctx context.Context, decision string) error {
 	_ = os.Remove("checkpoint.json")
 
 	a.currentState = StateRunning
-	return a.loop(ctx)
+	return a.loop(ctx, eventChan)
+}
+
+func (a *Agent) CompressHistory(messages []model.Message) []model.Message {
+	historyLen := 0
+	for _, m := range messages {
+		historyLen += (len(m.Content) + len(m.ReasoningContent)) / 3
+	}
+
+	if historyLen < a.maxContextTokens {
+		return messages
+	}
+
+	fmt.Println("[上下文]: 上下文超出窗口大小，自动开启上下文压缩...")
+
+	var compressed []model.Message
+	compressed = append(compressed, messages[0])
+	if len(messages) > 1 && messages[1].Role == "user" {
+		compressed = append(compressed, messages[1])
+	}
+
+	compressed = append(compressed, model.Message{
+		Role:    "user",
+		Content: "为节省上下文，中间的执行历史已被压缩裁剪，请基于最新的工具结果和用户初始任务作答",
+	})
+
+	startIndex := max(len(messages)-6, 2)
+
+	for startIndex < len(messages) && messages[startIndex].Role == "tool" {
+		startIndex--
+	}
+
+	compressed = append(compressed, messages[startIndex:]...)
+	fmt.Println("[上下文]: 上下文压缩完毕，继续执行")
+	return compressed
 }
 
 func isAlreadyExecuted(runID string, stepID int) bool {

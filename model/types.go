@@ -44,3 +44,8 @@ type Request struct {
 	Tools    []any     `json:"tools,omitempty"`
 	Stream   bool      `json:"stream,omitempty"`
 }
+
+type AgentEvent struct {
+	Type    string `json:"type"`
+	Content string `json:"content"`
+}
