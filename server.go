@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"learning/agent"
 	"learning/model"
 	"net/http"
+	"os"
 )
 
 func handleChat(w http.ResponseWriter, r *http.Request) {
@@ -56,6 +58,33 @@ func handleResume(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	streamEvents(w, eventChan)
+}
+
+func handleHistory(w http.ResponseWriter, r *http.Request) {
+	setupSSE(w, r)
+	if r.Method == http.MethodOptions {
+		return
+	}
+
+	file, err := os.Open("audit.jsonl")
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte("[]"))
+		return
+	}
+	defer file.Close()
+
+	var logs []agent.AuditLog
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		var log agent.AuditLog
+		if err := json.Unmarshal(scanner.Bytes(), &log); err == nil {
+			logs = append(logs, log)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(logs)
 }
 
 func setupSSE(w http.ResponseWriter, r *http.Request) {

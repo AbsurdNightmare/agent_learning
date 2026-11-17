@@ -48,4 +48,5 @@ type Request struct {
 type AgentEvent struct {
 	Type    string `json:"type"`
 	Content string `json:"content"`
+	Data    any    `json:"data,omitempty"`
 }

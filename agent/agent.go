@@ -70,7 +70,7 @@ func (a *Agent) loop(ctx context.Context, eventChan chan<- model.AgentEvent) err
 				eventChan <- model.AgentEvent{Type: "thinking", Content: delta.ReasoningContent}
 			}
 			if delta.Content != "" {
-				eventChan <- model.AgentEvent{Type: "thinking", Content: delta.Content}
+				eventChan <- model.AgentEvent{Type: "content", Content: delta.Content}
 			}
 		})
 
@@ -95,7 +95,7 @@ func (a *Agent) loop(ctx context.Context, eventChan chan<- model.AgentEvent) err
 		for _, call := range reply.ToolCalls {
 			eventChan <- model.AgentEvent{Type: "tool_call", Content: "调用工具: " + call.Function.Name}
 
-			result, err := a.execute(ctx, call, a.messages)
+			result, err := a.execute(ctx, call, a.messages, eventChan)
 			if err != nil {
 				if errors.Is(err, ErrInterrupted) {
 					eventChan <- model.AgentEvent{Type: "interrupted", Content: "触发审批，等待恢复"}
@@ -122,7 +122,7 @@ func (a *Agent) Run(ctx context.Context, input string, eventChan chan<- model.Ag
 	return a.loop(ctx, eventChan)
 }
 
-func (a *Agent) execute(ctx context.Context, call model.ToolCall, messages []model.Message) (string, error) {
+func (a *Agent) execute(ctx context.Context, call model.ToolCall, messages []model.Message, eventChan chan<- model.AgentEvent) (string, error) {
 	t, exists := a.tools[call.Function.Name]
 	if !exists {
 		return "", fmt.Errorf("不存在的工具: %s", call.Function.Name)
@@ -141,6 +141,25 @@ func (a *Agent) execute(ctx context.Context, call model.ToolCall, messages []mod
 		err := SaveCheckPoint(ctx, cp)
 		if err != nil {
 			return "", err
+		}
+
+		err = WriteAudit(AuditLog{
+			RunID:    cp.RunID,
+			Action:   "interrupted",
+			ToolName: call.Function.Name,
+			Args:     call.Function.Arguments,
+		})
+		if err != nil {
+			return "", err
+		}
+
+		eventChan <- model.AgentEvent{
+			Type:    "interrupted",
+			Content: "检测到高危操作，需人工介入",
+			Data: map[string]string{
+				"tool": t.Info().Name,
+				"args": call.Function.Arguments,
+			},
 		}
 
 		a.currentState = StatePendingApproval
@@ -166,11 +185,30 @@ func (a *Agent) Resume(ctx context.Context, decision string, eventChan chan<- mo
 
 	var result string
 	if decision == "n" {
+		err = WriteAudit(AuditLog{
+			RunID:    cp.RunID,
+			Action:   "rejected",
+			ToolName: call.Function.Name,
+		})
+		if err != nil {
+			return err
+		}
+
 		fmt.Println("[用户选择]: 用户拒绝了操作")
 		a.currentState = StateRejected
 		result = "用户拒绝了此危险操作，请勿重试"
 		a.currentState = StateTerminated
 	} else if decision == "y" {
+		err = WriteAudit(AuditLog{
+			RunID:    cp.RunID,
+			Action:   "approved",
+			ToolName: call.Function.Name,
+			Args:     call.Function.Arguments,
+		})
+		if err != nil {
+			return err
+		}
+
 		fmt.Println("[用户选择]: 用户批准了操作")
 		a.currentState = StateApproved
 
@@ -192,6 +230,17 @@ func (a *Agent) Resume(ctx context.Context, decision string, eventChan chan<- mo
 		if !json.Valid([]byte(newArgs)) {
 			return fmt.Errorf("您修改的参数不是合法的 JSON 格式")
 		}
+
+		err = WriteAudit(AuditLog{
+			RunID:    cp.RunID,
+			Action:   "modified",
+			ToolName: call.Function.Name,
+			Args:     newArgs,
+		})
+		if err != nil {
+			return err
+		}
+
 		fmt.Println("[用户选择]: 修改参数为:", newArgs)
 		a.currentState = StateApproved
 

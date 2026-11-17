@@ -1,3 +1,4 @@
 .env
 execution_log.txt
 ./docs
+audit.jsonl
